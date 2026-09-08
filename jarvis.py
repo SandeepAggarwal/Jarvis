@@ -107,7 +107,7 @@ class WakeWordDetector:
             command = self._extract_command(speech)
             if command is not None:
                 if not command:
-                    asyncio.create_task(asyncio.to_thread(speak_async, "Yes, how can I help you?"))
+                    await asyncio.to_thread(speak_async, "Yes, how can I help you?")
                 return command
 
     def _extract_command(self, text: str) -> Optional[str]:
@@ -220,6 +220,7 @@ class TaskManager:
         self.pending: asyncio.Queue = asyncio.Queue()
         self._current_token: Optional[CancellationToken] = None
         self._current_task: Optional[str] = None
+        self._processing = False
 
     def current_task(self) -> Optional[str]:
         return self._current_task
@@ -261,8 +262,12 @@ class TaskManager:
     # ------------------------------------------------------------------------
 
     async def _try_process(self) -> None:
-        if self.processor.is_busy:
+        if self._processing or self.processor.is_busy:
             return
+        if self.urgent.empty() and self.pending.empty():
+            return
+
+        self._processing = True
         # Get next task (urgent first)
         if not self.urgent.empty():
             task = await self.urgent.get()
@@ -329,6 +334,7 @@ class TaskHandler:
         interruption_handler: InterruptionHandler,
         speech_listener: SpeechListener,
         speech_queue: asyncio.Queue,
+        stt: SpeechRecognizer,
     ):
         self.wakeword_detector = wakeword_detector
         self.goodbye_detector = goodbye_detector
@@ -336,7 +342,7 @@ class TaskHandler:
         self.interruption_handler = interruption_handler
         self.speech_listener = speech_listener
         self.speech_queue = speech_queue
-
+        self.stt = stt
         self.running = True
 
     async def run(self) -> None:
@@ -422,6 +428,7 @@ def main():
         interruption_handler=interruption_handler,
         speech_listener=speech_listener,
         speech_queue=speech_queue,
+        stt=stt,
     )
 
     asyncio.run(task_handler.run())
