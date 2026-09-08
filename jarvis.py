@@ -288,6 +288,7 @@ class TaskManager:
         finally:
             self._current_task = None
             self._current_token = None
+            self._processing = False
             await self._try_process()
 
 # ============================================================================
