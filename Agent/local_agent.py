@@ -8,10 +8,8 @@ import subprocess
 import threading
 import time
 import uuid
-
 import requests
 from rich.console import Console
-
 from .tools.get_weather import get_weather, GET_WEATHER_TOOL
 from .tools.duck_web_search import duck_web_search, DUCK_WEB_SEARCH_TOOL
 from .tools.fetch_webpage import fetch_webpage, FETCH_WEBPAGE_TOOL
@@ -35,14 +33,10 @@ from .tools.web_automation import web_automation, WEB_AUTOMATION_TOOL
 from .tools.open_safari_tab import open_safari_tab, OPEN_SAFARI_TAB_TOOL
 from .tools.google_search import google_search, GOOGLE_SEARCH_TOOL
 from .proxies import proxies
-
 from .tools.text_to_speech.speech import speak_async, SPEECH_TOOL
-
 from .memory_monitor import get_current_rss_bytes, DEFAULT_MEM_LIMIT_BYTES
 
-
 console = Console()
-
 
 MLX_CHAT_URL = os.getenv(
     "MLX_CHAT_URL",
@@ -149,9 +143,7 @@ class TaskCancelled(Exception):
     """
     Raised when the currently executing agent task has been cancelled.
     """
-
     pass
-
 
 class CancellationToken:
     """
@@ -160,7 +152,6 @@ class CancellationToken:
     The token is thread-safe and can be shared between the task controller,
     LocalAgent, HTTP streaming, and tools that support cancellation.
     """
-
     def __init__(self):
         self._event = threading.Event()
 
@@ -187,22 +178,17 @@ class CancellationToken:
         """
         return self._event
 
-
 def parse_legacy_tool_call(text):
     function_match = re.search(
         r"<tool_call>\s*<function=(.*?)>(.*?)</function>\s*</tool_call>",
         text,
         re.DOTALL,
     )
-
     if not function_match:
         return []
-
     tool_name = function_match.group(1).strip()
     body = function_match.group(2)
-
     parameters = {}
-
     for match in re.finditer(
         r"<parameter=(.*?)>\s*(.*?)\s*</parameter>",
         body,
@@ -211,7 +197,6 @@ def parse_legacy_tool_call(text):
         name = match.group(1).strip()
         value = match.group(2).strip()
         parameters[name] = value
-
     return [
         {
             "id": f"legacy_{uuid.uuid4().hex}",
@@ -222,7 +207,6 @@ def parse_legacy_tool_call(text):
             },
         }
     ]
-
 
 def _build_tool_configs():
     TOOLS = [
@@ -241,7 +225,6 @@ def _build_tool_configs():
         OPEN_SAFARI_TAB_TOOL,
         GOOGLE_SEARCH_TOOL,
     ]
-
     TOOL_FUNCTIONS = {
         "get_weather": get_weather,
         "speak_async": speak_async,
@@ -258,9 +241,7 @@ def _build_tool_configs():
         "open_safari_tab": open_safari_tab,
         "google_search_safari": google_search,
     }
-
     return TOOLS, TOOL_FUNCTIONS
-
 
 def _make_payload(messages, tools, max_tokens):
     payload = {
@@ -271,12 +252,9 @@ def _make_payload(messages, tools, max_tokens):
         "max_tokens": max_tokens,
         "stream": True,
     }
-
     if LOCAL_MODEL_NAME:
         payload["model"] = LOCAL_MODEL_NAME
-
     return payload
-
 
 def _send_mlx_request(
     payload,
@@ -288,15 +266,11 @@ def _send_mlx_request(
     The request uses a short connection timeout and streams the response.
     Cancellation is checked between retry attempts and before returning.
     """
-
     max_attempts = 5
     base_delay = 1.0
-
     for attempt in range(1, max_attempts + 1):
-
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
-
         resp = requests.post(
             MLX_CHAT_URL,
             json=payload,
@@ -305,39 +279,29 @@ def _send_mlx_request(
             timeout=(10, 1800),
             stream=True,
         )
-
         if resp.status_code != 429:
             if cancellation_token and cancellation_token.is_cancelled():
                 resp.close()
                 cancellation_token.raise_if_cancelled()
-
             return resp
-
         if attempt == max_attempts:
             return resp
-
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
-
         delay = base_delay * (2 ** (attempt - 1))
         jitter = random.uniform(0, delay)
         sleep_time = delay + jitter
-
         console.print(
             "[yellow]"
             f"MLX 429 received — backing off {sleep_time:.2f}s "
             f"(attempt {attempt})"
             "[/yellow]"
         )
-
-        # Don't use time.sleep() for the entire backoff because we want
-        # cancellation to be noticed immediately.
         if cancellation_token:
             if cancellation_token.event.wait(timeout=sleep_time):
                 cancellation_token.raise_if_cancelled()
         else:
             time.sleep(sleep_time)
-
 
 def _stream_response(
     response,
@@ -349,56 +313,38 @@ def _stream_response(
     Cancellation is checked between received SSE lines. If cancellation
     occurs, the HTTP response is closed and TaskCancelled is raised.
     """
-
     content_chunks = []
     reasoning_chunks = []
     tool_calls = {}
-
     try:
         for line in response.iter_lines(decode_unicode=True):
-
             if cancellation_token:
                 cancellation_token.raise_if_cancelled()
-
             if not line:
                 continue
-
             if not line.startswith("data:"):
                 continue
-
             data = line[len("data:"):].strip()
-
             if data == "[DONE]":
                 break
-
             try:
                 chunk = json.loads(data)
             except json.JSONDecodeError:
                 continue
-
             choices = chunk.get("choices", [])
-
             if not choices:
                 continue
-
             delta = choices[0].get("delta", {})
-
             content = delta.get("content")
-
             if content:
                 print(content, end="", flush=True)
                 content_chunks.append(content)
-
             reasoning = delta.get("reasoning")
-
             if reasoning:
                 print(reasoning, end="", flush=True)
                 reasoning_chunks.append(reasoning)
-
             for tc in delta.get("tool_calls") or []:
-
                 index = tc.get("index", 0)
-
                 if index not in tool_calls:
                     tool_calls[index] = {
                         "id": "",
@@ -408,57 +354,40 @@ def _stream_response(
                             "arguments": "",
                         },
                     }
-
                 current = tool_calls[index]
-
                 if tc.get("id"):
                     current["id"] = tc["id"]
-
                 if tc.get("type"):
                     current["type"] = tc["type"]
-
                 function_delta = tc.get("function", {})
-
                 if function_delta.get("name"):
                     current["function"]["name"] += (
                         function_delta["name"]
                     )
-
                 if function_delta.get("arguments"):
                     current["function"]["arguments"] += (
                         function_delta["arguments"]
                     )
-
     except TaskCancelled:
-        # Closing the HTTP response is important. Otherwise the server
-        # may continue streaming data after agent has abandoned the task.
         response.close()
         raise
-
     finally:
         response.close()
-
     tool_list = list(tool_calls.values())
-
     if tool_list:
         console.print("[debug] received tool_calls:")
-
         for idx, tc in enumerate(tool_list):
             func = tc.get("function", {})
             name = func.get("name") or ""
             args = func.get("arguments") or ""
-
             console.print(
                 f"[debug] index={idx} "
                 f"id={tc.get('id')} "
                 f"name={name[:80]!r} "
                 f"args_len={len(args)}"
             )
-
     print()
-
     return content_chunks, reasoning_chunks, tool_list
-
 
 def _summarize_tool_result(
     tool_name: str,
@@ -469,10 +398,8 @@ def _summarize_tool_result(
     """
     Summarize a tool result while respecting cancellation.
     """
-
     if cancellation_token:
         cancellation_token.raise_if_cancelled()
-
     try:
         try:
             small_text = (
@@ -485,18 +412,14 @@ def _summarize_tool_result(
             )
         except Exception:
             small_text = str(tool_result)
-
         SHORT_THRESHOLD = 2000
-
         if isinstance(small_text, str) and len(small_text) <= SHORT_THRESHOLD:
             print(
                 f"[summarizer] short-circuit returning: "
                 f"{small_text!r}"
             )
             return small_text
-
         user_content = f"Tool: {tool_name}\n"
-
         if arguments:
             try:
                 args_text = json.dumps(
@@ -506,11 +429,8 @@ def _summarize_tool_result(
                 )
             except Exception:
                 args_text = str(arguments)
-
             user_content += f"Args:\n{args_text}\n"
-
         user_content += "Output:\n"
-
         user_content += (
             json.dumps(
                 tool_result,
@@ -520,7 +440,6 @@ def _summarize_tool_result(
             if not isinstance(tool_result, str)
             else tool_result
         )
-
         summary_messages = [
             {
                 "role": "system",
@@ -538,49 +457,37 @@ def _summarize_tool_result(
                 "content": user_content,
             },
         ]
-
         payload = _make_payload(
             summary_messages,
             [],
             20000,
         )
-
         resp = _send_mlx_request(
             payload,
             cancellation_token=cancellation_token,
         )
-
         if resp.status_code == 200:
             chunks, _, _ = _stream_response(
                 resp,
                 cancellation_token=cancellation_token,
             )
-
             result = "".join(chunks).strip() or str(tool_result)
-
             print(
                 f"[summarizer] returning: {result!r}"
             )
-
             return result
-
         print(
             "[summarizer] summarization failed: "
             "non-200 response"
         )
-
         return "tool response summarization failed"
-
     except TaskCancelled:
         raise
-
     except Exception as error:
         print(
             f"[summarizer] summarization exception: {error}"
         )
-
         return "tool response summarization failed"
-
 
 def _tool_accepts_cancellation_token(tool_function):
     """
@@ -589,18 +496,14 @@ def _tool_accepts_cancellation_token(tool_function):
 
     We do this dynamically so existing tools continue working unchanged.
     """
-
     try:
         signature = inspect.signature(tool_function)
-
         return (
             "cancellation_token" in signature.parameters
             or "cancel_event" in signature.parameters
         )
-
     except (TypeError, ValueError):
         return False
-
 
 def _execute_tool_function(
     tool_function,
@@ -623,33 +526,23 @@ def _execute_tool_function(
 
     automatically receive the cancellation mechanism.
     """
-
     if cancellation_token:
         cancellation_token.raise_if_cancelled()
-
     if cancellation_token and _tool_accepts_cancellation_token(tool_function):
-
         try:
             signature = inspect.signature(tool_function)
-
             if "cancellation_token" in signature.parameters:
                 arguments = dict(arguments)
                 arguments["cancellation_token"] = cancellation_token
-
             elif "cancel_event" in signature.parameters:
                 arguments = dict(arguments)
                 arguments["cancel_event"] = cancellation_token.event
-
         except (TypeError, ValueError):
             pass
-
     result = tool_function(**arguments)
-
     if cancellation_token:
         cancellation_token.raise_if_cancelled()
-
     return result
-
 
 def _execute_tool_calls(
     tool_calls,
@@ -661,15 +554,11 @@ def _execute_tool_calls(
     Execute all tool calls while respecting task cancellation.
     """
     terminal_tool_called = False
-
     for tool_call in tool_calls:
-
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
-
         function = tool_call["function"]
         tool_name = function["name"]
-
         console.print(
             f"[debug] executing tool_call "
             f"id={tool_call.get('id')} "
@@ -677,58 +566,42 @@ def _execute_tool_calls(
             f"args_preview="
             f"{str(function.get('arguments'))[:200]!r}"
         )
-
         try:
             arguments = json.loads(
                 function.get("arguments", "{}")
             )
-
         except json.JSONDecodeError as exc:
             raise RuntimeError(
                 f"Invalid JSON arguments for {tool_name}: "
                 f"{function.get('arguments')}"
             ) from exc
-
         console.print(
             f"[bold yellow]Calling tool:[/bold yellow] "
             f"{tool_name}({arguments})"
         )
-
         if tool_name not in tool_functions:
-
             tool_result = f"Unknown tool: {tool_name}"
-
         else:
-
             max_attempts = 5
             base_delay = 1.0
             attempt = 1
-
             while True:
-
                 if cancellation_token:
                     cancellation_token.raise_if_cancelled()
-
                 try:
                     tool_result = _execute_tool_function(
                         tool_functions[tool_name],
                         arguments,
                         cancellation_token,
                     )
-
                     break
-
                 except TaskCancelled:
                     raise
-
                 except requests.exceptions.RequestException as exc:
-
                     if cancellation_token:
                         cancellation_token.raise_if_cancelled()
-
                     resp = getattr(exc, "response", None)
                     status = getattr(resp, "status_code", None)
-
                     if (
                         status == 429
                         and attempt < max_attempts
@@ -736,10 +609,8 @@ def _execute_tool_calls(
                         delay = base_delay * (
                             2 ** (attempt - 1)
                         )
-
                         jitter = random.uniform(0, delay)
                         sleep_time = delay + jitter
-
                         console.print(
                             "[yellow]"
                             f"Tool {tool_name} 429 — "
@@ -747,7 +618,6 @@ def _execute_tool_calls(
                             f"(attempt {attempt})"
                             "[/yellow]"
                         )
-
                         if cancellation_token:
                             if cancellation_token.event.wait(
                                 timeout=sleep_time
@@ -755,32 +625,23 @@ def _execute_tool_calls(
                                 cancellation_token.raise_if_cancelled()
                         else:
                             time.sleep(sleep_time)
-
                         attempt += 1
                         continue
-
                     tool_result = (
                         f"Tool {tool_name} failed: "
                         f"{type(exc).__name__}: {exc}"
                     )
-
                     break
-
                 except Exception as exc:
-
                     if cancellation_token:
                         cancellation_token.raise_if_cancelled()
-
                     tool_result = (
                         f"Tool {tool_name} failed: "
                         f"{type(exc).__name__}: {exc}"
                     )
-
                     break
-
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
-
         try:
             small_text = (
                 tool_result
@@ -790,59 +651,43 @@ def _execute_tool_calls(
                     ensure_ascii=False,
                 )
             )
-
         except Exception:
             small_text = str(tool_result)
-
         NEED_SUMMARY_THRESHOLD = 2000
-
         if tool_name == "execute_command":
-
             summarized = small_text
-
             print(
                 "[summarizer] skipped summarization "
                 f"for {tool_name}; returning raw result"
             )
-
         else:
-
             need_summarize = False
-
             if tool_name in (
                 "duck_web_search",
                 "fetch_webpage",
                 "wikipedia_search",
             ):
                 need_summarize = True
-
             elif (
                 isinstance(small_text, str)
                 and len(small_text) > NEED_SUMMARY_THRESHOLD
             ):
                 need_summarize = True
-
             if need_summarize:
-
                 summarized = _summarize_tool_result(
                     tool_name,
                     tool_result,
                     arguments,
                     cancellation_token,
                 )
-
             else:
-
                 summarized = small_text
-
                 print(
                     "[summarizer] skipped summarization "
                     f"for {tool_name}; returning raw result"
                 )
-
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
-
         messages.append(
             {
                 "role": "tool",
@@ -851,16 +696,11 @@ def _execute_tool_calls(
                 "content": summarized,
             }
         )
-
         print(
             summarized,
             end="",
             flush=True,
         )
-
-        # speak_async is a terminal action. Once agent has spoken
-        # the final response, this user task is complete.
-        # If we don't do it, it loop around with same speak_async calls
         if tool_name in TERMINAL_TOOLS:
             terminal_tool_called = True
             console.print(
@@ -868,16 +708,13 @@ def _execute_tool_calls(
                 "ending current agent turn"
             )
             break
-
     return terminal_tool_called
-
 
 class LocalAgent:
     """
     Encapsulates agent lifecycle, payload, request, streaming,
     tool execution, and cooperative task cancellation.
     """
-
     def __init__(self):
         self.tools, self.tool_functions = _build_tool_configs()
         self.messages = []
@@ -927,10 +764,8 @@ class LocalAgent:
         Check current RSS and terminate process if it exceeds
         MEM_LIMIT_BYTES.
         """
-
         try:
             rss = get_current_rss_bytes()
-
             if rss is None:
                 console.print(
                     "[yellow]"
@@ -939,7 +774,6 @@ class LocalAgent:
                     "[/yellow]"
                 )
                 return
-
             if rss > MEM_LIMIT_BYTES:
                 console.print(
                     "[red]"
@@ -949,12 +783,10 @@ class LocalAgent:
                     "terminating agent"
                     "[/red]"
                 )
-
                 os.kill(
                     os.getpid(),
                     signal.SIGTERM,
                 )
-
             console.print(
                 "[green]"
                 f"Current memory usage: "
@@ -962,9 +794,7 @@ class LocalAgent:
                 f"{MEM_LIMIT_BYTES / 1024**3:.2f}GB"
                 "[/green]"
             )
-
         except Exception as error:
-
             console.print(
                 "[yellow]"
                 f"Memory monitoring failed: {error}; "
@@ -987,15 +817,12 @@ class LocalAgent:
         caller. The caller can then decide whether to discard the task,
         report cancellation, or move to another task.
         """
-
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
-
         print(
             f"[agent] Running with user prompt: "
             f"{user_prompt!r}"
         )
-
         if not self.messages:
             self.messages.append(
                 {
@@ -1003,52 +830,40 @@ class LocalAgent:
                     "content": SYSTEM_PROMPT,
                 }
             )
-
         self.messages.append(
             {
                 "role": "user",
                 "content": user_prompt,
             }
         )
-
         print(
             f"[agent] Running with "
             f"{len(self.messages)} messages in context"
         )
-
         while True:
-
             if cancellation_token:
                 cancellation_token.raise_if_cancelled()
-
             self._check_memory_and_maybe_exit()
-
             cancellation_token.raise_if_cancelled()
-
             payload = self.make_payload(
                 self.messages,
                 max_tokens,
             )
-
             response = self.send_request(
                 payload,
                 cancellation_token=cancellation_token,
             )
-
             try:
                 if cancellation_token:
                     cancellation_token.raise_if_cancelled()
-
                 if response.status_code != 200:
                     raise RuntimeError(
                         f"MLX server error: "
                         f"{response.status_code}\n"
                         f"{response.text}"
                     )
-
                 if cancellation_token:
                     cancellation_token.raise_if_cancelled()
-
                 (
                     content_chunks,
                     reasoning_chunks,
@@ -1057,36 +872,24 @@ class LocalAgent:
                     response,
                     cancellation_token=cancellation_token,
                 )
-
             finally:
                 response.close()
-
             cancellation_token.raise_if_cancelled()
-
             if not tool_calls:
-
                 reasoning = "".join(
                     reasoning_chunks
                 )
-
                 if "<tool_call>" in reasoning:
-
                     parsed = parse_legacy_tool_call(
                         reasoning
                     )
-
                     if parsed:
                         tool_calls = parsed
-
                     else:
                         return "".join(content_chunks)
-
                 else:
-
                     return "".join(content_chunks)
-
             cancellation_token.raise_if_cancelled()
-
             self.messages.append(
                 {
                     "role": "assistant",
@@ -1097,12 +900,10 @@ class LocalAgent:
                     "tool_calls": tool_calls,
                 }
             )
-
             task_completed = self.execute_tool_calls(
                 tool_calls,
                 self.messages,
                 cancellation_token=cancellation_token,
             )
-
             if task_completed:
                 return ""
