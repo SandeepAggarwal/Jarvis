@@ -169,6 +169,7 @@ class CancellationToken:
 
     def raise_if_cancelled(self):
         if self.is_cancelled():
+            console.print("[yellow]Task cancellation requested. Aborting operation.[/yellow]")
             raise TaskCancelled("Task cancelled by user.")
 
     @property

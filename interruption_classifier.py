@@ -47,12 +47,14 @@ QUEUE:
 CANCEL_AND_RUN:
 - The new request clearly changes the user's priority.
 - The current task should be stopped as soon as safely possible.
-- The new request should become the active task.
+- The new request should become the active task. If there is nothing to do, then new
+request should be empty string ""
 - Examples:
   "stop that"
   "cancel what you're doing"
   "forget that, search for Tokyo hotels instead"
   "no, do this instead"
+  "nevermind, I will do it"
 
 MERGE:
 - The new request is an addition, refinement, correction, or continuation of the
@@ -172,9 +174,6 @@ class InterruptionClassifier:
             classification = "QUEUE"
 
         task = result.get("task", "").strip()
-
-        if not task:
-            task = content
 
         return {
             "classification": classification,
