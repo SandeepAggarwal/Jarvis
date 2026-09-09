@@ -510,8 +510,53 @@ class TaskHandler:
 # APPLICATION ENTRY POINT
 # ============================================================================
 
-def main():
+
+    # ============================================================================
+# MOCK STT FOR TESTING
+# ============================================================================
+
+class MockSpeechRecognizer:
+    """Simulates speech input for testing without a microphone."""
+    def __init__(self, responses: list):
+        self.responses = responses.copy()
+        self.index = 0
+
+    def listen(self) -> str:
+        """Return the next simulated utterance, sleeping 5 seconds between each."""
+        if self.index >= len(self.responses):
+            # Return empty to stop (or loop)
+            return ""
+        response = self.responses[self.index]
+        self.index += 1
+        # Simulate the gap between utterances
+        import time
+        time.sleep(7)
+        return response
+
+    def close(self) -> None:
+        pass
+
+
+def main(test_mode: bool = False):
     deps = create_dependencies()
+
+    if test_mode:
+        console.print("[bold yellow]=== RUNNING IN TEST MODE ===[/bold yellow]")
+        # Create a mock STT that returns:
+        # 1) Wake word + first command
+        # 2) Follow‑up 1
+        # 3) Follow‑up 2
+        # 4) Goodbye to end the session
+        mock_stt = MockSpeechRecognizer([
+            "Jarvis Find weather in Delhi",
+            "Actually, find in Mumbai",
+            "Nevermind I will check it myself",
+            "goodbye",   # exit the listening loop
+        ])
+        # Override dependencies: we use the mock instead of the real STT
+        deps.stt = mock_stt   # replace with mock
+
+
     stt = deps.stt
     agent = deps.agent
     classifier = deps.classifier
@@ -540,4 +585,5 @@ def main():
     asyncio.run(task_handler.run())
 
 if __name__ == "__main__":
-    main()
+    # Set test_mode=True to run the simulation, False for real microphone
+    main(test_mode=True)
