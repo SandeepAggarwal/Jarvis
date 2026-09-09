@@ -14,94 +14,32 @@ LOCAL_MODEL_NAME = os.getenv("LOCAL_MODEL_NAME", "").strip()
 
 
 CLASSIFIER_SYSTEM_PROMPT = """
-You are Jarvis's interruption classifier.
+You are Jarvis's interruption classifier. Given the current task, queued tasks, and a new user utterance, decide one of:
 
-Jarvis may currently be executing a task when the user speaks again. There may also
-be other tasks waiting in the queue.
+IGNORE – Not a meaningful request (e.g., "okay", "hmm").
+QUEUE – New independent task to run after the current one finishes.
+CANCEL_AND_RUN – User wants to stop the current task and start a new one. If only cancellation (no new task), set "task": "".
+MERGE – New speech is a refinement/addition to the current task (not a separate future task).
+MODIFY_QUEUED – User wants to change/replace a specific queued task. Must provide:
+  - "target_index": 0-based index from the provided queue list.
+  - "new_task_text": the new text for that task (empty string = delete it).
 
-Classify the NEW user utterance into exactly ONE of:
+Guidelines:
+- Prefer MERGE when the new utterance clearly relates to the current task.
+- Prefer QUEUE when it's unrelated and can wait.
+- Prefer CANCEL_AND_RUN when the user clearly wants to abort and change direction.
+- Use MODIFY_QUEUED only if the utterance refers to a task already in the queue (by content/order).
+- Use IGNORE for non‑requests, acknowledgements, or noise.
 
-IGNORE
-QUEUE
-CANCEL_AND_RUN
-MERGE
-MODIFY_QUEUED
-
-Definitions:
-
-IGNORE:
-- The utterance is not a meaningful user request.
-- Background speech, accidental speech, filler, acknowledgement, noise-like transcription,
-  or something that should not cause Jarvis to perform another task.
-- Examples:
-  "okay"
-  "yeah"
-  "hmm"
-  "never mind"
-  "that's fine"
-
-QUEUE:
-- A meaningful new task that should happen after the current task finishes.
-- It does NOT require stopping the current task.
-- Examples:
-  "after that, remind me to call John"
-  "then check the weather"
-  "also search for flights to Tokyo"
-
-CANCEL_AND_RUN:
-- The new request clearly changes the user's priority.
-- The current task should be stopped as soon as safely possible.
-- The new request should become the active task. If there is nothing new task to do but just cancel the task, then new
-  request should be empty string "".
-- Examples:
-  "stop that"
-  "cancel what you're doing"
-  "forget that, search for Tokyo hotels instead"
-  "no, do this instead"
-  "nevermind, I will do it"
-
-MERGE:
-- The new request is an addition, refinement, correction, or continuation of the
-  CURRENT task and should be incorporated into the same task rather than treated
-  as an independent later task.
-- Examples:
-  Current: "Find me flights to London."
-  New: "Make that business class."
-  Current: "Search for restaurants in Delhi."
-  New: "Only vegetarian ones."
-  Current: "Open that website."
-  New: "And click the second result."
-
-MODIFY_QUEUED:
-- The user wants to change or replace a specific task that is already waiting in the queue.
-- This is for modifying a task that is NOT the currently running one, but is somewhere
-  in the pending queue.
-- You MUST output:
-    "target_index": the 0‑based index of the task in the queued list (as shown in the prompt)
-    "new_task_text": the new content for that task
-    "task": a short description (optional)
-- Examples:
-  * User says: "Actually, for that weather request I made earlier, change the city to Paris."
-    → Find the "weather" task in the queue, set its index, and new text = "Get weather for Paris".
-  * User says: "Cancel the calendar check I asked for."
-    → Set new_task_text = "" or "cancel" to effectively remove it, or you can simply replace it with an empty task.
-
-Important guidelines:
-- Use the CURRENT TASK and the QUEUED TASKS (with indices) to decide.
-- If the new request clearly refers to a queued task (by content or time), use MODIFY_QUEUED.
-- If it modifies the current task, prefer MERGE.
-- If it is independent, prefer QUEUE.
-- If it tells Jarvis to stop/change direction, prefer CANCEL_AND_RUN.
-- If it isn't meaningful, use IGNORE.
-
-Return ONLY valid JSON with these keys:
-- "classification": one of the above
-- "reason": short explanation
-- "task": cleaned version of the new request (for QUEUE, CANCEL_AND_RUN, MERGE, or optional for MODIFY_QUEUED)
-- "target_index": integer (only for MODIFY_QUEUED)
-- "new_task_text": string (only for MODIFY_QUEUED)
+Return **only** valid JSON with these keys:
+{
+  "classification": "<one of the five>",
+  "reason": "<short explanation>",
+  "task": "<cleaned task text, required for QUEUE/CANCEL_AND_RUN/MERGE, optional for MODIFY_QUEUED>",
+  "target_index": <integer, required for MODIFY_QUEUED>,
+  "new_task_text": "<string, required for MODIFY_QUEUED>"
+}
 """
-
 
 class InterruptionClassifier:
     def __init__(self):
