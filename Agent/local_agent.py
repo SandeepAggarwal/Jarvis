@@ -555,9 +555,7 @@ def _execute_tool_calls(
     Execute all tool calls while respecting task cancellation.
     """
     terminal_tool_called = False
-    for tool_call in tool_calls:
-        if cancellation_token:
-            cancellation_token.raise_if_cancelled()
+    for idx, tool_call in enumerate(tool_calls):
         function = tool_call["function"]
         tool_name = function["name"]
         console.print(
@@ -597,6 +595,18 @@ def _execute_tool_calls(
                     )
                     break
                 except TaskCancelled:
+                    # Mark all remaining tool calls (including current) as cancelled
+                    for remaining_idx in range(idx, len(tool_calls)):
+                        remaining_call = tool_calls[remaining_idx]
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": remaining_call["id"],
+                            "name": remaining_call["function"]["name"],
+                            "content": json.dumps({
+                                "cancelled": True,
+                                "reason": "cancelled by user"
+                            })
+                        })
                     raise
                 except requests.exceptions.RequestException as exc:
                     if cancellation_token:

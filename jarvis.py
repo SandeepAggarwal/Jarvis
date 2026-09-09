@@ -1,9 +1,9 @@
 import asyncio
 import functools
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional
+from typing import Optional, List
 
 from rich.console import Console
 from rich.panel import Panel
@@ -41,12 +41,16 @@ class InterruptionType(Enum):
     QUEUE = auto()
     CANCEL_AND_RUN = auto()
     MERGE = auto()
+    MODIFY_QUEUED = auto()
 
 @dataclass
 class Interruption:
     type: InterruptionType
-    task: str
+    task: str                       # The task to run / merge / etc.
     reason: str = ""
+    # For MODIFY_QUEUED:
+    target_index: Optional[int] = None
+    new_task_text: Optional[str] = None
 
 # ============================================================================
 # INTERRUPTION POLICY (synchronous LLM call)
@@ -58,22 +62,42 @@ class InterruptionPolicy:
     def __init__(self, classifier: InterruptionClassifier):
         self.classifier = classifier
 
-    def classify(self, current_task: str, new_task: str) -> Interruption:
+    def classify(self, current_task: str, queued_tasks: List[str], new_task: str) -> Interruption:
+        """
+        Calls the classifier with the full queue. Expects a dict with at least:
+            classification: str (one of IGNORE, QUEUE, CANCEL_AND_RUN, MERGE, MODIFY_QUEUED)
+            task: str
+            reason: str (optional)
+            target_index: int (only for MODIFY_QUEUED)
+            new_task_text: str (only for MODIFY_QUEUED)
+        """
         result = self.classifier.classify(
             current_task=current_task,
+            queued_tasks=queued_tasks,
             new_task=new_task,
         )
         if not isinstance(result, dict):
             raise ValueError("Classifier must return a dict")
+
         classification = result.get("classification", self.DEFAULT_TYPE.name).upper()
         task = result.get("task", "").strip()
         reason = result.get("reason", "")
+        target_index = result.get("target_index")
+        new_task_text = result.get("new_task_text")
+
         try:
             typ = InterruptionType[classification]
         except KeyError:
             console.print(f"[yellow]Unknown type {classification!r}, using {self.DEFAULT_TYPE.name}[/yellow]")
             typ = self.DEFAULT_TYPE
-        return Interruption(type=typ, task=task, reason=str(reason).strip())
+
+        return Interruption(
+            type=typ,
+            task=task,
+            reason=str(reason).strip(),
+            target_index=target_index if typ == InterruptionType.MODIFY_QUEUED else None,
+            new_task_text=new_task_text if typ == InterruptionType.MODIFY_QUEUED else None,
+        )
 
 # ============================================================================
 # GOODBYE DETECTOR
@@ -173,7 +197,6 @@ class TaskProcessor:
         try:
             prompt = self._build_prompt(task)
             console.print(f"[blue]Executing task: {task}[/blue]")
-            # Pass token as a keyword argument using functools.partial
             await asyncio.to_thread(
                 functools.partial(self.agent.run, prompt, cancellation_token=token)
             )
@@ -227,7 +250,12 @@ class TaskManager:
 
     def cancel_current(self) -> None:
         if self._current_token is not None:
+            # Log the task that is about to be cancelled
+            task_desc = self._current_task if self._current_task is not None else "Unknown task"
+            console.print(f"[bold yellow]Cancelling current task: {task_desc}[/bold yellow]")
             self._current_token.cancel()
+        else:
+            console.print("[dim]No current task to cancel.[/dim]")
 
     # ------------------------------------------------------------------------
     # Public methods for adding tasks (called by TaskHandler or InterruptionHandler)
@@ -256,6 +284,60 @@ class TaskManager:
         merged = f"{current}\n\nUser refinement/addition:\n{task}"
         self.cancel_current()
         await self.add_task(merged, urgent=True)
+
+    async def get_queued_tasks(self) -> List[str]:
+        """
+        Returns a copy of all queued tasks (urgent first, then pending)
+        without modifying the queue.
+        """
+        urgent_items = []
+        while not self.urgent.empty():
+            urgent_items.append(self.urgent.get_nowait())
+        pending_items = []
+        while not self.pending.empty():
+            pending_items.append(self.pending.get_nowait())
+
+        # Refill immediately
+        for item in urgent_items:
+            await self.urgent.put(item)
+        for item in pending_items:
+            await self.pending.put(item)
+
+        return urgent_items + pending_items
+
+    async def replace_task_at_index(self, index: int, new_task: str) -> bool:
+        """
+        Replaces the task at the given global index (0 = first urgent, then pending).
+        Returns True if successful, False if index out of range.
+        """
+        # Drain both queues
+        urgent_items = []
+        while not self.urgent.empty():
+            urgent_items.append(self.urgent.get_nowait())
+        pending_items = []
+        while not self.pending.empty():
+            pending_items.append(self.pending.get_nowait())
+
+        all_tasks = urgent_items + pending_items
+        if index < 0 or index >= len(all_tasks):
+            # Refill and return False
+            for item in urgent_items:
+                await self.urgent.put(item)
+            for item in pending_items:
+                await self.pending.put(item)
+            return False
+
+        # Replace
+        all_tasks[index] = new_task
+
+        # Refill with modified list
+        urgent_count = len(urgent_items)
+        for item in all_tasks[:urgent_count]:
+            await self.urgent.put(item)
+        for item in all_tasks[urgent_count:]:
+            await self.pending.put(item)
+
+        return True
 
     # ------------------------------------------------------------------------
     # Internal: start next task when idle
@@ -291,6 +373,12 @@ class TaskManager:
             self._processing = False
             await self._try_process()
 
+    def clear_queues(self) -> None:
+        while not self.urgent.empty():
+            self.urgent.get_nowait()
+        while not self.pending.empty():
+            self.pending.get_nowait()
+
 # ============================================================================
 # INTERRUPTION HANDLER
 # ============================================================================
@@ -300,12 +388,23 @@ class InterruptionHandler:
         self.policy = policy
         self.task_manager = task_manager
 
-    async def handle(self, speech: str, current_task: str) -> None:
+    async def handle(self, speech: str) -> None:
+        current = self.task_manager.current_task()
+        if current is None:
+            # No task is running: just queue the speech
+            await self.task_manager.add_task(speech, urgent=False)
+            return
+
+        # Get a snapshot of the current queue
+        queued_tasks = await self.task_manager.get_queued_tasks()
+
         interruption = await asyncio.to_thread(
             self.policy.classify,
-            current_task,
+            current,
+            queued_tasks,
             speech
         )
+
         console.print(
             Panel(
                 f"Classification: {interruption.type.name}\nTask: {interruption.task}\nReason: {interruption.reason}",
@@ -313,14 +412,32 @@ class InterruptionHandler:
                 border_style="magenta",
             )
         )
+
         if interruption.type == InterruptionType.IGNORE:
             return
+
         elif interruption.type == InterruptionType.QUEUE:
             await self.task_manager.queue_interruption(interruption.task)
+
         elif interruption.type == InterruptionType.CANCEL_AND_RUN:
             await self.task_manager.cancel_and_run(interruption.task)
+
         elif interruption.type == InterruptionType.MERGE:
-            await self.task_manager.merge(interruption.task, current_task)
+            await self.task_manager.merge(interruption.task, current)
+
+        elif interruption.type == InterruptionType.MODIFY_QUEUED:
+            target_idx = interruption.target_index
+            new_text = interruption.new_task_text
+            if target_idx is not None and new_text:
+                replaced = await self.task_manager.replace_task_at_index(target_idx, new_text)
+                if replaced:
+                    console.print(f"[green]Modified queued task at index {target_idx}: -> {new_text}[/green]")
+                else:
+                    console.print(f"[red]Index {target_idx} out of range.[/red]")
+   
+            else:
+                console.print("[red]MODIFY_QUEUED missing target_index or new_task_text.[/red]")
+                
 
 # ============================================================================
 # TASK HANDLER (main orchestrator)
@@ -368,21 +485,12 @@ class TaskHandler:
                     console.print("[yellow]Goodbye detected – returning to wake‑word mode.[/yellow]")
                     await self.speech_listener.stop()
                     self.task_manager.cancel_current()
-                    # Clear queues
-                    while not self.task_manager.urgent.empty():
-                        self.task_manager.urgent.get_nowait()
-                    while not self.task_manager.pending.empty():
-                        self.task_manager.pending.get_nowait()
+                    self.task_manager.clear_queues()
                     await asyncio.to_thread(speak_async, "Goodbye!")
                     break  # exit inner loop
 
-                # Check if a task is currently being processed
-                if self.task_manager.processor.is_busy:
-                    current = self.task_manager.current_task()
-                    if current is not None:
-                        await self.interruption_handler.handle(speech, current)
-                else:
-                    await self.task_manager.add_task(speech, urgent=False)
+                # Interruption handling – we pass the whole task_manager to the handler
+                await self.interruption_handler.handle(speech)
 
             # After goodbye, the listener is stopped and we go back to wake‑word loop
 
@@ -393,10 +501,7 @@ class TaskHandler:
         self.running = False
         await self.speech_listener.stop()
         self.task_manager.cancel_current()
-        while not self.task_manager.urgent.empty():
-            self.task_manager.urgent.get_nowait()
-        while not self.task_manager.pending.empty():
-            self.task_manager.pending.get_nowait()
+        self.task_manager.clear_queues()
         await asyncio.to_thread(self.stt.close)
         await asyncio.to_thread(stop_speaker)
         console.print("[yellow]Jarvis shut down.[/yellow]")
