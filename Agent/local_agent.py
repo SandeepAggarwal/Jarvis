@@ -32,9 +32,14 @@ from .tools.web_automation import web_automation, WEB_AUTOMATION_TOOL
 from .tools.open_safari_tab import open_safari_tab, OPEN_SAFARI_TAB_TOOL
 from .tools.google_search import google_search, GOOGLE_SEARCH_TOOL
 from .proxies import proxies
-from .tools.text_to_speech.speech import speak_async, SPEECH_TOOL
+from .tools.text_to_speech.speech import speak_sync, SPEECH_TOOL
 from .memory_monitor import get_current_rss_bytes, DEFAULT_MEM_LIMIT_BYTES
 from .cancelTask import TaskCancelled, CancellationToken
+from inspect import currentframe
+
+def get_line():
+    # .f_back refers to the line where get_line() was actually called
+    return currentframe().f_back.f_lineno
 
 console = Console()
 
@@ -128,15 +133,15 @@ In case you need to control a web browser to perform more complex tasks like fil
 or navigating websites consider makin javascript automation tools using selenium and web_automation tool or
 making python scripts that can be executed using execute_command_tool.
 
-If the user expects an audio response, use speak_async once to deliver the final response.
-After speak_async succeeds, the current user request is complete and no further tool calls
+If the user expects an audio response, use speak_sync once to deliver the final response.
+After speak_sync succeeds, the current user request is complete and no further tool calls
 should be made for that request to acknowledge it.
 
 If the user is expecting text, then respond in text format.
 """
 
 TERMINAL_TOOLS = {
-    "speak_async",
+    "speak_sync",
 }
 
 def parse_legacy_tool_call(text):
@@ -188,7 +193,7 @@ def _build_tool_configs():
     ]
     TOOL_FUNCTIONS = {
         "get_weather": get_weather,
-        "speak_async": speak_async,
+        "speak_sync": speak_sync,
         "wikipedia_search": wikipedia_search,
         "fetch_webpage": fetch_webpage,
         "duck_web_search": duck_web_search,
@@ -230,7 +235,8 @@ def _send_mlx_request(
     max_attempts = 5
     base_delay = 1.0
     for attempt in range(1, max_attempts + 1):
-        if cancellation_token:
+        if cancellation_token and cancellation_token.is_cancelled():
+            print(f"cancelling at line {get_line()}")
             cancellation_token.raise_if_cancelled()
         resp = requests.post(
             MLX_CHAT_URL,
@@ -243,11 +249,13 @@ def _send_mlx_request(
         if resp.status_code != 429:
             if cancellation_token and cancellation_token.is_cancelled():
                 resp.close()
+                print(f"cancelling at line {get_line()}")
                 cancellation_token.raise_if_cancelled()
             return resp
         if attempt == max_attempts:
             return resp
-        if cancellation_token:
+        if cancellation_token and cancellation_token.is_cancelled():
+            print(f"cancelling at line {get_line()}")
             cancellation_token.raise_if_cancelled()
         delay = base_delay * (2 ** (attempt - 1))
         jitter = random.uniform(0, delay)
@@ -260,6 +268,7 @@ def _send_mlx_request(
         )
         if cancellation_token:
             if cancellation_token.event.wait(timeout=sleep_time):
+                print(f"cancelling at line {get_line()}")
                 cancellation_token.raise_if_cancelled()
         else:
             time.sleep(sleep_time)
@@ -279,7 +288,8 @@ def _stream_response(
     tool_calls = {}
     try:
         for line in response.iter_lines(decode_unicode=True):
-            if cancellation_token:
+            if cancellation_token and cancellation_token.is_cancelled():
+                print(f"cancelling at line {get_line()}")
                 cancellation_token.raise_if_cancelled()
             if not line:
                 continue
@@ -359,7 +369,8 @@ def _summarize_tool_result(
     """
     Summarize a tool result while respecting cancellation.
     """
-    if cancellation_token:
+    if cancellation_token and cancellation_token.is_cancelled():
+        print(f"cancelling at line {get_line()}")
         cancellation_token.raise_if_cancelled()
     try:
         try:
@@ -487,7 +498,8 @@ def _execute_tool_function(
 
     automatically receive the cancellation mechanism.
     """
-    if cancellation_token:
+    if cancellation_token and cancellation_token.is_cancelled():
+        print(f"cancelling at line {get_line()}")
         cancellation_token.raise_if_cancelled()
     if cancellation_token and _tool_accepts_cancellation_token(tool_function):
         try:
@@ -501,7 +513,8 @@ def _execute_tool_function(
         except (TypeError, ValueError):
             pass
     result = tool_function(**arguments)
-    if cancellation_token:
+    if cancellation_token and cancellation_token.is_cancelled():
+        print(f"cancelling at line {get_line()}")
         cancellation_token.raise_if_cancelled()
     return result
 
@@ -545,7 +558,8 @@ def _execute_tool_calls(
             base_delay = 1.0
             attempt = 1
             while True:
-                if cancellation_token:
+                if cancellation_token and cancellation_token.is_cancelled():
+                    print(f"cancelling at line {get_line()}")
                     cancellation_token.raise_if_cancelled()
                 try:
                     tool_result = _execute_tool_function(
@@ -569,7 +583,8 @@ def _execute_tool_calls(
                         })
                     raise
                 except requests.exceptions.RequestException as exc:
-                    if cancellation_token:
+                    if cancellation_token and cancellation_token.is_cancelled():
+                        print(f"cancelling at line {get_line()}")
                         cancellation_token.raise_if_cancelled()
                     resp = getattr(exc, "response", None)
                     status = getattr(resp, "status_code", None)
@@ -590,9 +605,8 @@ def _execute_tool_calls(
                             "[/yellow]"
                         )
                         if cancellation_token:
-                            if cancellation_token.event.wait(
-                                timeout=sleep_time
-                            ):
+                            if cancellation_token.event.wait(timeout=sleep_time):
+                                print(f"cancelling at line {get_line()}")
                                 cancellation_token.raise_if_cancelled()
                         else:
                             time.sleep(sleep_time)
@@ -604,14 +618,16 @@ def _execute_tool_calls(
                     )
                     break
                 except Exception as exc:
-                    if cancellation_token:
+                    if cancellation_token and cancellation_token.is_cancelled():
+                        print(f"cancelling at line {get_line()}")
                         cancellation_token.raise_if_cancelled()
                     tool_result = (
                         f"Tool {tool_name} failed: "
                         f"{type(exc).__name__}: {exc}"
                     )
                     break
-        if cancellation_token:
+        if cancellation_token and cancellation_token.is_cancelled():
+            print(f"cancelling at line {get_line()}")
             cancellation_token.raise_if_cancelled()
         try:
             small_text = (
@@ -657,7 +673,8 @@ def _execute_tool_calls(
                     "[summarizer] skipped summarization "
                     f"for {tool_name}; returning raw result"
                 )
-        if cancellation_token:
+        if cancellation_token and cancellation_token.is_cancelled():
+            print(f"cancelling at line {get_line()}")
             cancellation_token.raise_if_cancelled()
         messages.append(
             {
@@ -788,7 +805,8 @@ class LocalAgent:
         caller. The caller can then decide whether to discard the task,
         report cancellation, or move to another task.
         """
-        if cancellation_token:
+        if cancellation_token and cancellation_token.is_cancelled():
+            print(f"cancelling at line {get_line()}")
             cancellation_token.raise_if_cancelled()
         print(
             f"[agent] Running with user prompt: "
@@ -812,10 +830,15 @@ class LocalAgent:
             f"{len(self.messages)} messages in context"
         )
         while True:
-            if cancellation_token:
+            if cancellation_token and cancellation_token.is_cancelled():
+                print(f"cancelling at line {get_line()}")
                 cancellation_token.raise_if_cancelled()
+
             self._check_memory_and_maybe_exit()
-            cancellation_token.raise_if_cancelled()
+
+            if cancellation_token and cancellation_token.is_cancelled():
+                print(f"cancelling at line {get_line()}")
+                cancellation_token.raise_if_cancelled()
             payload = self.make_payload(
                 self.messages,
                 max_tokens,
@@ -825,7 +848,8 @@ class LocalAgent:
                 cancellation_token=cancellation_token,
             )
             try:
-                if cancellation_token:
+                if cancellation_token and cancellation_token.is_cancelled():
+                    print(f"cancelling at line {get_line()}")
                     cancellation_token.raise_if_cancelled()
                 if response.status_code != 200:
                     raise RuntimeError(
@@ -833,7 +857,8 @@ class LocalAgent:
                         f"{response.status_code}\n"
                         f"{response.text}"
                     )
-                if cancellation_token:
+                if cancellation_token and cancellation_token.is_cancelled():
+                    print(f"cancelling at line {get_line()}")
                     cancellation_token.raise_if_cancelled()
                 (
                     content_chunks,
@@ -845,7 +870,10 @@ class LocalAgent:
                 )
             finally:
                 response.close()
-            cancellation_token.raise_if_cancelled()
+
+            if cancellation_token and cancellation_token.is_cancelled():
+                print(f"cancelling at line {get_line()}")
+                cancellation_token.raise_if_cancelled()
             if not tool_calls:
                 reasoning = "".join(
                     reasoning_chunks
@@ -860,7 +888,11 @@ class LocalAgent:
                         return "".join(content_chunks)
                 else:
                     return "".join(content_chunks)
-            cancellation_token.raise_if_cancelled()
+
+            if cancellation_token and cancellation_token.is_cancelled():
+                print(f"cancelling at line {get_line()}")
+                cancellation_token.raise_if_cancelled()
+
             self.messages.append(
                 {
                     "role": "assistant",

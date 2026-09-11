@@ -12,7 +12,7 @@ from Agent.local_agent import LocalAgent
 from Agent.cancelTask import TaskCancelled, CancellationToken
 from interruption_classifier import InterruptionClassifier
 from Agent.tools.speech_to_text.speech_to_text import SpeechRecognizer
-from Agent.tools.text_to_speech.speech import speak_async, stop_speaker
+from Agent.tools.text_to_speech.speech import speak_sync, stop_speaker
 
 console = Console()
 
@@ -132,7 +132,7 @@ class WakeWordDetector:
             command = self._extract_command(speech)
             if command is not None:
                 if not command:
-                    await asyncio.to_thread(speak_async, "Yes, how can I help you?")
+                    await asyncio.to_thread(speak_sync, "Yes, how can I help you?")
                 return command
 
     def _extract_command(self, text: str) -> Optional[str]:
@@ -215,18 +215,18 @@ You are Jarvis, a voice-controlled personal assistant.
 
 Answer the user's request using the available tools.
 
-When a task requires speaking to the user, call speak_async exactly once
+When a task requires speaking to the user, call speak_sync exactly once
 with the final response.
 
-After calling speak_async, consider the task complete.
-Do not call speak_async again for the same task.
+After calling speak_sync, consider the task complete.
+Do not call speak_sync again for the same task.
 Do not repeat previous tool calls unless the user explicitly asks you
 to retry or provides new information.
 
 For actions such as opening or playing a file:
 1. Perform the action.
 2. Verify the action if possible.
-3. Call speak_async once with the result.
+3. Call speak_sync once with the result.
 4. Stop processing the current task.
 
 User task:
@@ -542,7 +542,7 @@ class TaskHandler:
         self.running = True
 
     async def run(self) -> None:
-        await asyncio.to_thread(speak_async, "I am on...")
+        await asyncio.to_thread(speak_sync, "I am on...")
         console.print("[green]Jarvis is ready.[/green]")
 
         while self.running:
@@ -564,7 +564,7 @@ class TaskHandler:
                     await self.speech_listener.stop()
                     self.task_manager.cancel_current()
                     self.task_manager.clear_queues()
-                    await asyncio.to_thread(speak_async, "Goodbye!")
+                    await asyncio.to_thread(speak_sync, "Goodbye!")
                     break  # exit inner loop
 
                 # Interruption handling – we pass the whole task_manager to the handler
@@ -608,7 +608,7 @@ class MockSpeechRecognizer:
         self.index += 1
         # Simulate the gap between utterances
         import time
-        time.sleep(5)
+        time.sleep(4.4)
         return response
 
     def close(self) -> None:
@@ -626,11 +626,8 @@ def main(test_mode: bool = False):
         # 3) Follow‑up 2
         # 4) Goodbye to end the session
         mock_stt = MockSpeechRecognizer([
-            "Jarvis Find weather in Delhi",
-            "play sample.mp3 file on my desktop",
-            "find the weather in Mumbai instead of Delhi",
-            "Don't find weather, I will check the weather myself",
-            #"goodbye",   # exit the listening loop
+            "Hey Jarvis, tell me about yourself in your voice",
+            "Stop, be quiet"
         ])
         # Override dependencies: we use the mock instead of the real STT
         deps.stt = mock_stt   # replace with mock
