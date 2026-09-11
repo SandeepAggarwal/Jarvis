@@ -5,7 +5,6 @@ import random
 import re
 import signal
 import subprocess
-import threading
 import time
 import uuid
 import requests
@@ -35,6 +34,7 @@ from .tools.google_search import google_search, GOOGLE_SEARCH_TOOL
 from .proxies import proxies
 from .tools.text_to_speech.speech import speak_async, SPEECH_TOOL
 from .memory_monitor import get_current_rss_bytes, DEFAULT_MEM_LIMIT_BYTES
+from .cancelTask import TaskCancelled, CancellationToken
 
 console = Console()
 
@@ -138,46 +138,6 @@ If the user is expecting text, then respond in text format.
 TERMINAL_TOOLS = {
     "speak_async",
 }
-
-class TaskCancelled(Exception):
-    """
-    Raised when the currently executing agent task has been cancelled.
-    """
-    pass
-
-class CancellationToken:
-    """
-    Cooperative cancellation token for a single agent task.
-
-    The token is thread-safe and can be shared between the task controller,
-    LocalAgent, HTTP streaming, and tools that support cancellation.
-    """
-    def __init__(self):
-        self._event = threading.Event()
-
-    def cancel(self):
-        """
-        Request cancellation.
-
-        This does not forcibly kill any Python thread. Code currently
-        performing work must observe the token and exit cooperatively.
-        """
-        self._event.set()
-
-    def is_cancelled(self) -> bool:
-        return self._event.is_set()
-
-    def raise_if_cancelled(self):
-        if self.is_cancelled():
-            console.print("[yellow]Task cancellation requested. Aborting operation.[/yellow]")
-            raise TaskCancelled("Task cancelled by user.")
-
-    @property
-    def event(self):
-        """
-        Expose the underlying Event for tools that want to use it directly.
-        """
-        return self._event
 
 def parse_legacy_tool_call(text):
     function_match = re.search(

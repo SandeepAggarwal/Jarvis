@@ -8,7 +8,8 @@ from typing import Optional, List
 from rich.console import Console
 from rich.panel import Panel
 
-from Agent.local_agent import LocalAgent, CancellationToken, TaskCancelled
+from Agent.local_agent import LocalAgent
+from Agent.cancelTask import TaskCancelled, CancellationToken
 from interruption_classifier import InterruptionClassifier
 from Agent.tools.speech_to_text.speech_to_text import SpeechRecognizer
 from Agent.tools.text_to_speech.speech import speak_async, stop_speaker
@@ -251,9 +252,28 @@ class TaskManager:
     def cancel_current(self) -> None:
         if self._current_token is not None:
             # Log the task that is about to be cancelled
-            task_desc = self._current_task if self._current_task is not None else "Unknown task"
-            console.print(f"[bold yellow]Cancelling current task: {task_desc}[/bold yellow]")
+            task_desc = (
+                self._current_task
+                if self._current_task is not None
+                else "Unknown task"
+            )
+
+            console.print(
+                f"[bold yellow]Cancelling current task: {task_desc}[/bold yellow]"
+            )
+
+            # Request cancellation from the running agent.
             self._current_token.cancel()
+
+            # IMPORTANT:
+            # Immediately remove the task from the logical "current" state.
+            #
+            # CancellationToken.cancel() only requests cancellation.
+            # The actual processor may take some time to notice it.
+            # Without clearing this here, a new interruption can still
+            # incorrectly think the OLD task is running.
+            self._current_task = None
+
         else:
             console.print("[dim]No current task to cancel.[/dim]")
 
@@ -277,13 +297,34 @@ class TaskManager:
         await self.add_task(task, urgent=False)
 
     async def cancel_and_run(self, task: str) -> None:
+        # Cancel the currently running task.
+        #
+        # cancel_current() now immediately clears _current_task, so
+        # subsequent interruptions will correctly see the replacement
+        # task once it becomes current.
         self.cancel_current()
+
+        # Put the replacement at the front of the execution priority.
         await self.add_task(task, urgent=True)
 
     async def merge(self, task: str, current: str) -> None:
-        merged = f"{current}\n\nUser refinement/addition:\n{task}"
+        # A MERGE is treated as a refinement/replacement of the current task.
+        #
+        # Example:
+        #
+        # Current:
+        #   Find weather in Delhi
+        #
+        # New:
+        #   Actually, find the weather in Mumbai
+        #
+        # We don't concatenate both instructions because that would leave
+        # the agent responsible for figuring out which request supersedes
+        # the other. Instead, the classifier has already interpreted the
+        # new request, so the new task becomes the current task.
         self.cancel_current()
-        await self.add_task(merged, urgent=True)
+
+        await self.add_task(task, urgent=True)
 
     async def get_queued_tasks(self) -> List[str]:
         """
@@ -356,10 +397,11 @@ class TaskManager:
         elif not self.pending.empty():
             task = await self.pending.get()
         else:
+            self._processing = False
             return
 
         self._current_task = task
-        token = CancellationToken()
+        token = CancellationToken(console=console)
         self._current_token = token
 
         asyncio.create_task(self._run_and_continue(task, token))
@@ -368,9 +410,16 @@ class TaskManager:
         try:
             await self.processor.process(task, token)
         finally:
-            self._current_task = None
-            self._current_token = None
-            self._processing = False
+            # Only clear the current task if this task is still the
+            # current task.
+            #
+            # This protects us from accidentally clearing state belonging
+            # to a replacement task if the old cancelled task finishes
+            # after the replacement has started.
+            if self._current_token is token:
+                self._current_task = None
+                self._current_token = None
+                self._processing = False
             await self._try_process()
 
     def clear_queues(self) -> None:
@@ -407,7 +456,9 @@ class InterruptionHandler:
 
         console.print(
             Panel(
-                f"Classification: {interruption.type.name}\nTask: {interruption.task}\nReason: {interruption.reason}",
+                f"Classification: {interruption.type.name}\n"
+                f"Task: {interruption.task}\n"
+                f"Reason: {interruption.reason}",
                 title="Interruption",
                 border_style="magenta",
             )
@@ -423,21 +474,48 @@ class InterruptionHandler:
             await self.task_manager.cancel_and_run(interruption.task)
 
         elif interruption.type == InterruptionType.MERGE:
+            # MERGE means the new request supersedes/refines the
+            # currently running task.
+            #
+            # Example:
+            #   Current: Find weather in Delhi
+            #   New:     Actually, find weather in Mumbai
+            #
+            # Result:
+            #   Current: Find weather in Mumbai
+            #
+            # Existing queued tasks remain unchanged.
             await self.task_manager.merge(interruption.task, current)
 
         elif interruption.type == InterruptionType.MODIFY_QUEUED:
             target_idx = interruption.target_index
             new_text = interruption.new_task_text
             if target_idx is not None and new_text:
-                replaced = await self.task_manager.replace_task_at_index(target_idx, new_text)
+                replaced = await self.task_manager.replace_task_at_index(
+                    target_idx,
+                    new_text
+                )
+
                 if replaced:
-                    console.print(f"[green]Modified queued task at index {target_idx}: -> {new_text}[/green]")
+                    console.print(
+                        f"[green]"
+                        f"Modified queued task at index {target_idx}: "
+                        f"-> {new_text}"
+                        f"[/green]"
+                    )
                 else:
-                    console.print(f"[red]Index {target_idx} out of range.[/red]")
-   
+                    console.print(
+                        f"[red]"
+                        f"Index {target_idx} out of range."
+                        f"[/red]"
+                    )
+
             else:
-                console.print("[red]MODIFY_QUEUED missing target_index or new_task_text.[/red]")
-                
+                console.print(
+                    "[red]"
+                    "MODIFY_QUEUED missing target_index or new_task_text."
+                    "[/red]"
+                )
 
 # ============================================================================
 # TASK HANDLER (main orchestrator)
@@ -530,7 +608,7 @@ class MockSpeechRecognizer:
         self.index += 1
         # Simulate the gap between utterances
         import time
-        time.sleep(7)
+        time.sleep(5)
         return response
 
     def close(self) -> None:
@@ -549,9 +627,10 @@ def main(test_mode: bool = False):
         # 4) Goodbye to end the session
         mock_stt = MockSpeechRecognizer([
             "Jarvis Find weather in Delhi",
-            "Actually, find in Mumbai",
-            "Nevermind I will check it myself",
-            "goodbye",   # exit the listening loop
+            "play sample.mp3 file on my desktop",
+            "find the weather in Mumbai instead of Delhi",
+            "Don't find weather, I will check the weather myself",
+            #"goodbye",   # exit the listening loop
         ])
         # Override dependencies: we use the mock instead of the real STT
         deps.stt = mock_stt   # replace with mock

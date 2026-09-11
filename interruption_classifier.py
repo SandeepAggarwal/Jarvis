@@ -1,6 +1,7 @@
 import json
 import os
 from typing import List, Optional
+from Agent.cancelTask import TaskCancelled, CancellationToken
 
 import requests
 
@@ -19,7 +20,7 @@ You are Jarvis's interruption classifier. Given the current task, queued tasks, 
 IGNORE – Not a meaningful request (e.g., "okay", "hmm").
 QUEUE – New independent task to run after the current one finishes.
 CANCEL_AND_RUN – User wants to stop the current task and start a new one. If only cancellation (no new task), set "task": "".
-MERGE – New speech is a refinement/addition to the current task (not a separate future task).
+MERGE – New speech refines, corrects, replaces, narrows, expands, or adds information to the current task (not a separate future task).
 MODIFY_QUEUED – User wants to change/replace a specific queued task. Must provide:
   - "target_index": 0-based index from the provided queue list.
   - "new_task_text": the new text for that task (empty string = delete it).
@@ -93,31 +94,40 @@ class InterruptionClassifier:
         if LOCAL_MODEL_NAME:
             payload["model"] = LOCAL_MODEL_NAME
 
-        response = requests.post(
-            MLX_CHAT_URL,
-            json=payload,
-            proxies=proxies,
-            verify=False,
-            timeout=60,
-        )
-
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"Interruption classifier failed: "
-                f"{response.status_code}: {response.text}"
+        try:
+            response = requests.post(
+                MLX_CHAT_URL,
+                json=payload,
+                proxies=proxies,
+                verify=False,
+                timeout=60,
             )
 
-        data = response.json()
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Interruption classifier failed: "
+                    f"{response.status_code}: {response.text}"
+                )
 
-        content = (
-            data["choices"][0]["message"]
-            .get("content", "")
-            .strip()
-        )
+            data = response.json()
 
-        result = self._parse_result(content)
+            content = (
+                data["choices"][0]["message"]
+                .get("content", "")
+                .strip()
+            )
 
-        return result
+            result = self._parse_result(content)
+
+            return result
+        except TaskCancelled:
+            raise
+        except Exception as error:
+            print(
+                f"[classifier] classifier exception: {error}"
+            )
+            return "classifier failed"
+            
 
     @staticmethod
     def _parse_result(content: str) -> dict:
