@@ -12,6 +12,7 @@ Both TTS and STT access this runtime through:
 """
 
 from __future__ import annotations
+import time
 
 import queue
 import threading
@@ -187,8 +188,30 @@ class AudioRuntime:
             )
             position += FRAME_SIZE
 
-    def wait_for_tts(self) -> None:
-        self._speaker_queue.join()
+
+    def wait_for_tts(self, timeout: Optional[float] = None) -> bool:
+        """
+        Block until all queued TTS audio has been played.
+
+        timeout=None -> block indefinitely (original behaviour).
+        timeout=t    -> return False if not drained within t seconds.
+                        Return True  if fully drained.
+        """
+        if timeout is None:
+            self._speaker_queue.join()
+            return True
+
+        deadline = time.monotonic() + timeout
+        while True:
+            # `unfinished_tasks` decrements only after the callback calls
+            # task_done() on the frame it just played. `empty()` would lie
+            # because the callback holds one frame in-flight for ~10 ms.
+            if self._speaker_queue.unfinished_tasks == 0:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self._speaker_queue.unfinished_tasks == 0
+            time.sleep(min(0.01, remaining))
 
     def clear_tts(self) -> None:
         """

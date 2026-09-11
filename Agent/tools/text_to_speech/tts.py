@@ -12,98 +12,70 @@ TARGET_SAMPLE_RATE = 16000
 
 
 class TTS:
-    """
-    Piper TTS.
-
-    Piper generates audio.
-
-    AudioRuntime owns the actual speaker device.
-    """
-
     def __init__(self, audio_runtime):
-
         self.audio_runtime = audio_runtime
-
         model_path = get_voice()
-
-        self.voice = PiperVoice.load(
-            str(model_path)
-        )
+        self.voice = PiperVoice.load(str(model_path))
 
     @staticmethod
-    def _resample(
-        audio: np.ndarray,
-        source_rate: int,
-    ) -> np.ndarray:
-
-        audio = np.asarray(
-            audio,
-            dtype=np.int16,
-        ).reshape(-1)
-
+    def _resample(audio, source_rate):
+        audio = np.asarray(audio, dtype=np.int16).reshape(-1)
         if source_rate == TARGET_SAMPLE_RATE:
-
             return audio
-
-        # ----------------------------------------------------
-        # Piper may output 22050 Hz.
-        #
-        # Convert to the same 16 kHz format used by:
-        #
-        #     speaker
-        #     AEC
-        #     microphone
-        #     STT
-        # ----------------------------------------------------
-
         converted = resample_poly(
             audio.astype(np.float32),
             TARGET_SAMPLE_RATE,
             source_rate,
         )
+        converted = np.clip(converted, -32768, 32767)
+        return converted.astype(np.int16)
 
-        converted = np.clip(
-            converted,
-            -32768,
-            32767,
-        )
-
-        return converted.astype(
-            np.int16
-        )
-
-    def speak(
-        self,
-        text: str,
-    ) -> None:
+    def speak(self, text: str, cancellation_token=None) -> None:
 
         if not text:
             return
-
         text = text.strip()
-
         if not text:
             return
+
+        # ---- cancellation helpers -------------------------------
+
+        def _cancelled() -> bool:
+            if cancellation_token is None:
+                return False
+            try:
+                return bool(cancellation_token.is_cancelled())
+            except Exception:
+                return False
+
+        def _abort():
+            # Purge queued audio; in-flight frame finishes its 10 ms.
+            self.audio_runtime.clear_tts()
+
+        # Pre-flight check.
+        if _cancelled():
+            _abort()
+            cancellation_token.raise_if_cancelled()
+
+        # ---- synthesis loop (checks token per chunk) ------------
 
         for audio in self.voice.synthesize(text):
 
-            pcm = np.frombuffer(
-                audio.audio_int16_bytes,
-                dtype=np.int16,
-            )
+            if _cancelled():
+                _abort()
+                cancellation_token.raise_if_cancelled()
 
-            pcm = self._resample(
-                pcm,
-                audio.sample_rate,
-            )
+            pcm = np.frombuffer(audio.audio_int16_bytes, dtype=np.int16)
+            pcm = self._resample(pcm, audio.sample_rate)
+            self.audio_runtime.enqueue_tts(pcm)
 
-            self.audio_runtime.enqueue_tts(
-                pcm
-            )
+        # ---- drain wait (checks token every ~50 ms) -------------
 
-        # ----------------------------------------------------
-        # Wait until the actual speaker has consumed all
-        # TTS audio.
-        # ----------------------------------------------------
+        while True:
+            if _cancelled():
+                _abort()
+                cancellation_token.raise_if_cancelled()
 
-        self.audio_runtime.wait_for_tts()
+            drained = self.audio_runtime.wait_for_tts(timeout=0.05)
+            if drained:
+                break
