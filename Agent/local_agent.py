@@ -513,9 +513,6 @@ def _execute_tool_function(
         except (TypeError, ValueError):
             pass
     result = tool_function(**arguments)
-    if cancellation_token and cancellation_token.is_cancelled():
-        print(f"cancelling at line {get_line()}")
-        cancellation_token.raise_if_cancelled()
     return result
 
 def _execute_tool_calls(
@@ -626,9 +623,6 @@ def _execute_tool_calls(
                         f"{type(exc).__name__}: {exc}"
                     )
                     break
-        if cancellation_token and cancellation_token.is_cancelled():
-            print(f"cancelling at line {get_line()}")
-            cancellation_token.raise_if_cancelled()
         try:
             small_text = (
                 tool_result
@@ -641,7 +635,11 @@ def _execute_tool_calls(
         except Exception:
             small_text = str(tool_result)
         NEED_SUMMARY_THRESHOLD = 2000
-        if tool_name == "execute_command":
+
+        if tool_name == "speak_sync" and tool_result.cancelled:
+            console.print(f"[yellow]User heard up to: {tool_result.text_heard!r}[/yellow]")
+            summarized = f"User interrupted and heard up to: {tool_result.text_heard!r}"
+        elif tool_name == "execute_command":
             summarized = small_text
             print(
                 "[summarizer] skipped summarization "
@@ -673,9 +671,6 @@ def _execute_tool_calls(
                     "[summarizer] skipped summarization "
                     f"for {tool_name}; returning raw result"
                 )
-        if cancellation_token and cancellation_token.is_cancelled():
-            print(f"cancelling at line {get_line()}")
-            cancellation_token.raise_if_cancelled()
         messages.append(
             {
                 "role": "tool",

@@ -12,7 +12,7 @@ from Agent.local_agent import LocalAgent
 from Agent.cancelTask import TaskCancelled, CancellationToken
 from interruption_classifier import InterruptionClassifier
 from Agent.tools.speech_to_text.speech_to_text import SpeechRecognizer
-from Agent.tools.text_to_speech.speech import speak_sync, stop_speaker
+from Agent.tools.text_to_speech.speech import speak_sync, stop_speaker, is_speaking
 
 console = Console()
 
@@ -211,7 +211,9 @@ class TaskProcessor:
     @staticmethod
     def _build_prompt(task: str) -> str:
         return f"""
-You are Jarvis, a voice-controlled personal assistant.
+You are Jarvis, a voice-controlled personal assistant. 
+Always reply in voice using speak_sync tool. I CANT READ TEXT. DO NOT REPLY IN TEXT. 
+I will communicate in english only, ignore any other languages
 
 Answer the user's request using the available tools.
 
@@ -228,6 +230,9 @@ For actions such as opening or playing a file:
 2. Verify the action if possible.
 3. Call speak_sync once with the result.
 4. Stop processing the current task.
+
+If the user interrupted while speak_sync was in progress, continue speaking
+after what user already heard. Do not repeat what the user already heard.
 
 User task:
 {task}
@@ -250,19 +255,13 @@ class TaskManager:
         return self._current_task
 
     def cancel_current(self) -> None:
-        if self._current_token is not None:
-            # Log the task that is about to be cancelled
-            task_desc = (
-                self._current_task
-                if self._current_task is not None
-                else "Unknown task"
-            )
-
+        if self._current_token is not None and self._current_task is not None:
+            task_desc = self._current_task
             console.print(
-                f"[bold yellow]Cancelling current task: {task_desc}[/bold yellow]"
-            )
+                    f"[bold yellow]Cancelling current task: {task_desc}[/bold yellow]"
+                )
 
-            # Request cancellation from the running agent.
+                    # Request cancellation from the running agent.
             self._current_token.cancel()
 
             # IMPORTANT:
@@ -444,6 +443,21 @@ class InterruptionHandler:
             await self.task_manager.add_task(speech, urgent=False)
             return
 
+        # ------------------------------------------------------------------
+        # Fast path: if the current task is inside a speak_sync call, cancel
+        # it right now, *before* the (slow) LLM classification round‑trip.
+        # This gives the user instant "shut up" behaviour when they barge in
+        # while Jarvis is talking.
+        # ------------------------------------------------------------------
+        if is_speaking():
+            console.print(
+                "[bold yellow]User interrupted while Jarvis was speaking — "
+                "cancelling current task immediately (skipping classification wait)."
+                "[/bold yellow]"
+            )
+            self.task_manager.cancel_current()
+            return
+
         # Get a snapshot of the current queue
         queued_tasks = await self.task_manager.get_queued_tasks()
 
@@ -608,7 +622,7 @@ class MockSpeechRecognizer:
         self.index += 1
         # Simulate the gap between utterances
         import time
-        time.sleep(4.4)
+        time.sleep(15)
         return response
 
     def close(self) -> None:
@@ -626,8 +640,9 @@ def main(test_mode: bool = False):
         # 3) Follow‑up 2
         # 4) Goodbye to end the session
         mock_stt = MockSpeechRecognizer([
-            "Hey Jarvis, tell me about yourself in your voice",
-            "Stop, be quiet"
+            "Hey Jarvis, tell me about yourself",
+            "stop",
+            "continue",
         ])
         # Override dependencies: we use the mock instead of the real STT
         deps.stt = mock_stt   # replace with mock
@@ -662,4 +677,4 @@ def main(test_mode: bool = False):
 
 if __name__ == "__main__":
     # Set test_mode=True to run the simulation, False for real microphone
-    main(test_mode=True)
+    main(test_mode=False)

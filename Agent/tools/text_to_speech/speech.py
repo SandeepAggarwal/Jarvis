@@ -36,6 +36,8 @@ SPEECH_TOOL = {
     },
 }
 
+_speaking = False
+
 
 @dataclass
 class _SpeechItem:
@@ -43,6 +45,7 @@ class _SpeechItem:
     text: str
     done: threading.Event
     cancellation_token: Any = None
+    result: Any = None    # SpokenResult from TTS.speak
 
 
 # Queue holds either a _SpeechItem or None (the poison pill for shutdown).
@@ -164,10 +167,11 @@ def _worker_loop():
 
             # Prefer to pass the token through so TTS can abort
             # mid-playback (e.g. between audio chunks).
-            _tts.speak(
+            result = _tts.speak(
                 item.text,
                 cancellation_token=item.cancellation_token,
             )
+            item.result = result
 
         except Exception as e:
             # Swallow CancelledError-style exceptions as expected,
@@ -186,10 +190,8 @@ def _worker_loop():
                 item.done.set()
             _speech_queue.task_done()
 
-
 def speak_sync(text: str,
-               cancellation_token=None,
-               wait: bool = True):
+               cancellation_token=None,):
     """
     Queue text for synchronous speech.
 
@@ -212,7 +214,7 @@ def speak_sync(text: str,
         finished being spoken. If False, it returns immediately after
         enqueueing (fire-and-forget).
     """
-
+    global _speaking
     # Fast path: already cancelled before we do anything.
     if cancellation_token and cancellation_token.is_cancelled():
         _log_cancel(
@@ -232,6 +234,7 @@ def speak_sync(text: str,
 
     _ensure_speaker()
 
+    _speaking = True
     item = _SpeechItem(
         text=text,
         done=threading.Event(),
@@ -239,22 +242,20 @@ def speak_sync(text: str,
     )
     _speech_queue.put(item)
 
-    if not wait:
-        return
+        # Wait until the worker has fully processed this item — whether that
+    # means "spoke it all" or "bailed out on cancellation".
+    item.done.wait()
 
-    # Block until the worker has finished this item, OR until the
-    # caller's token is cancelled — whichever happens first.
-    while not item.done.wait(timeout=0.1):
-        if cancellation_token and cancellation_token.is_cancelled():
-            # The item is still in the queue (or in-flight). The worker
-            # will see the token on its next check and either skip the
-            # item or let TTS abort it. We just stop waiting here.
-            _log_cancel(
-                f"speak_sync stopped waiting due to cancellation, "
-                f"text={text!r}",
-                depth=2,
-            )
-            cancellation_token.raise_if_cancelled()
+    if item.result is not None:
+        _speaking = False
+        return item.result
+
+    # Worker never produced a result (shouldn't normally happen).
+    from .tts import SpokenResult      # local import to avoid cycle at module load
+    _speaking = False
+    return SpokenResult(full_text=text, text_heard="", cancelled=True)
+
+def is_speaking() -> bool: return _speaking
 
 
 def wait_for_speech() -> None:
@@ -294,4 +295,5 @@ __all__ = [
     "speak_sync",
     "wait_for_speech",
     "stop_speaker",
+    "is_speaking",
 ]

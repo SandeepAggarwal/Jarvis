@@ -42,6 +42,8 @@ class AudioRuntime:
 
     def __init__(self):
         self._closed = False
+        self._played_samples = 0     # cumulative samples handed to the speaker
+        self._barge_in_callback = None   # callable() -> None
 
         # ====================================================
         # Speaker queue
@@ -144,58 +146,58 @@ class AudioRuntime:
         print(f"  {FRAME_SIZE} samples/frame")
         print(f"  {FRAME_SIZE / SAMPLE_RATE * 1000:.1f} ms/frame")
 
+    def set_barge_in_callback(self, cb):
+        self._barge_in_callback = cb
+
+    def _fire_barge_in(self):
+        cb = self._barge_in_callback
+        if cb is not None:
+            try:
+                cb()
+            except Exception as e:
+                print("barge-in callback error:", repr(e))
+
     # ========================================================
     # TTS
     # ========================================================
 
-    def enqueue_tts(self, audio: np.ndarray) -> None:
+    def enqueue_tts(self, audio: np.ndarray) -> int:
         """
         Queue 16 kHz mono int16 audio for playback.
 
-        Audio is split into 10 ms frames.
+        Returns the number of *samples* enqueued (after zero-padding the
+        final frame), so callers can map audio back to source text in the
+        same units the callback reports.
         """
-
         if audio is None:
-            return
+            return 0
 
-        audio = np.asarray(
-            audio,
-            dtype=np.int16,
-        ).reshape(-1)
-
+        audio = np.asarray(audio, dtype=np.int16).reshape(-1)
         if audio.size == 0:
-            return
+            return 0
 
         position = 0
-
+        samples_enqueued = 0
         while position < len(audio):
-            frame = audio[
-                position:
-                position + FRAME_SIZE
-            ]
-
-            # Pad final frame.
+            frame = audio[position:position + FRAME_SIZE]
             if len(frame) < FRAME_SIZE:
-                padded = np.zeros(
-                    FRAME_SIZE,
-                    dtype=np.int16,
-                )
+                padded = np.zeros(FRAME_SIZE, dtype=np.int16)
                 padded[:len(frame)] = frame
                 frame = padded
-
-            self._speaker_queue.put(
-                frame.copy()
-            )
+            self._speaker_queue.put(frame.copy())
+            samples_enqueued += FRAME_SIZE
             position += FRAME_SIZE
+        return samples_enqueued
 
 
+# replace wait_for_tts
     def wait_for_tts(self, timeout: Optional[float] = None) -> bool:
         """
         Block until all queued TTS audio has been played.
 
         timeout=None -> block indefinitely (original behaviour).
-        timeout=t    -> return False if not drained within t seconds.
-                        Return True  if fully drained.
+        timeout=t    -> return False if not drained within t seconds;
+                        return True if fully drained.
         """
         if timeout is None:
             self._speaker_queue.join()
@@ -203,15 +205,16 @@ class AudioRuntime:
 
         deadline = time.monotonic() + timeout
         while True:
-            # `unfinished_tasks` decrements only after the callback calls
-            # task_done() on the frame it just played. `empty()` would lie
-            # because the callback holds one frame in-flight for ~10 ms.
             if self._speaker_queue.unfinished_tasks == 0:
                 return True
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return self._speaker_queue.unfinished_tasks == 0
             time.sleep(min(0.01, remaining))
+
+    def get_played_samples(self) -> int:
+        """Cumulative number of samples handed to the speaker since start."""
+        return self._played_samples
 
     def clear_tts(self) -> None:
         """
@@ -259,6 +262,7 @@ class AudioRuntime:
 
         try:
             far = self._speaker_queue.get_nowait()
+            self._played_samples += len(far) 
         except queue.Empty:
             far = np.zeros(frames, dtype=np.int16)
 
