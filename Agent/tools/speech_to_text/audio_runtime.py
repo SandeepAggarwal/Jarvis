@@ -43,7 +43,6 @@ class AudioRuntime:
     def __init__(self):
         self._closed = False
         self._played_samples = 0     # cumulative samples handed to the speaker
-        self._barge_in_callback = None   # callable() -> None
 
         # ====================================================
         # Speaker queue
@@ -145,17 +144,6 @@ class AudioRuntime:
         print(f"  {SAMPLE_RATE} Hz")
         print(f"  {FRAME_SIZE} samples/frame")
         print(f"  {FRAME_SIZE / SAMPLE_RATE * 1000:.1f} ms/frame")
-
-    def set_barge_in_callback(self, cb):
-        self._barge_in_callback = cb
-
-    def _fire_barge_in(self):
-        cb = self._barge_in_callback
-        if cb is not None:
-            try:
-                cb()
-            except Exception as e:
-                print("barge-in callback error:", repr(e))
 
     # ========================================================
     # TTS
